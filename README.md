@@ -1,3 +1,12 @@
+A modified version of OpenSBI for smoll_rv32
+========================================================
+
+Key changes
+* Removal of all instructions which depend on the M and A extension.
+* Support for software emulation of M and A extension.
+* Adding a driver for simple_uart.
+
+
 RISC-V Open Source Supervisor Binary Interface (OpenSBI)
 ========================================================
 
