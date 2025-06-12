@@ -10,12 +10,370 @@
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_illegal_atomic.h>
 #include <sbi/sbi_illegal_insn.h>
+#include <sbi/sbi_console.h>
 
 #if !defined(__riscv_atomic) && !defined(__riscv_zalrsc)
 #error "opensbi strongly relies on the A extension of RISC-V"
 #endif
 
-#ifdef __riscv_atomic
+// #define SMOLL_RV32
+
+#ifdef SMOLL_RV32
+
+static s32 lr_s32(const s32 *addr, struct sbi_trap_info *trap){
+	register ulong tinfo asm("a3");
+	register ulong mstatus = 0;
+	register ulong mtvec = sbi_hart_expected_trap_addr();
+	s32 ret = 0;
+	trap->cause = 0;
+	asm volatile(
+		"add %[tinfo], %[taddr], zero\n"
+		"csrrw %[mtvec], " STR(CSR_MTVEC) ", %[mtvec]\n"
+		"csrrs %[mstatus], " STR(CSR_MSTATUS) ", %[mprv]\n"
+		".option push\n"
+		".option norvc\n"
+		"lw  %[ret], %[addr]\n"
+		".option pop\n"
+		"csrw " STR(CSR_MSTATUS) ", %[mstatus]\n"
+		"csrw " STR(CSR_MTVEC) ", %[mtvec]"
+		: [mstatus] "+&r"(mstatus), [mtvec] "+&r"(mtvec),
+			[tinfo] "+&r"(tinfo), [ret] "=&r"(ret)
+		: [addr] "m"(*addr), [mprv] "r"(MSTATUS_MPRV),
+			[taddr] "r"((ulong)trap)
+		: "a4", "memory");
+	return ret;
+}
+
+static s32 sc_s32(s32 *addr, s32 val, struct sbi_trap_info *trap){									\
+	register ulong tinfo asm("a3");
+	register ulong mstatus = 0;
+	register ulong mtvec = sbi_hart_expected_trap_addr();
+	s32 ret = 0;
+	trap->cause = 0;
+	asm volatile(
+		"add %[tinfo], %[taddr], zero\n"
+		"csrrw %[mtvec], " STR(CSR_MTVEC) ", %[mtvec]\n"	
+		"csrrs %[mstatus], " STR(CSR_MSTATUS) ", %[mprv]\n"
+		".option push\n"
+		".option norvc\n"
+		"sw  %[val], %[addr]\n"
+		"li  %[ret], 0\n"
+		".option pop\n"
+		"csrw " STR(CSR_MSTATUS) ", %[mstatus]\n"
+		"csrw " STR(CSR_MTVEC) ", %[mtvec]"
+		: [mstatus] "+&r"(mstatus), [mtvec] "+&r"(mtvec),
+			[tinfo] "+&r"(tinfo), [ret] "=&r"(ret)
+		: [addr] "m"(*addr), [mprv] "r"(MSTATUS_MPRV),
+			[val] "r"(val), [taddr] "r"((ulong)trap)
+		: "a4", "memory");
+	return ret;
+}
+
+static int lr_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong rd_val = 0;
+	rd_val = lr_s32((void *)addr, &uptrap);
+	if (uptrap.cause) {
+		return sbi_trap_redirect(regs, &uptrap);
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int sc_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		fail = sc_s32((void *)addr, rd_val + val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+
+static int amoadd_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, rd_val + val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amoswap_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amoxor_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, rd_val ^ val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amoor_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, rd_val | val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amoand_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, rd_val & val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amomin_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, (s32)rd_val < (s32)val ? rd_val : val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amomax_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, (s32)rd_val > (s32)val ? rd_val : val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amominu_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, (u32)rd_val < (u32)val ? rd_val : val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static int amomaxu_insn(ulong insn, struct sbi_trap_regs *regs)
+{
+	if(GET_FUNC3(insn) != 2)
+		return truly_illegal_insn(insn, regs);
+	
+	struct sbi_trap_info uptrap;
+	ulong addr = GET_RS1(insn, regs);
+	ulong val = GET_RS2(insn, regs);
+	ulong rd_val = 0;
+	ulong fail = 1;
+	while (fail) {
+		rd_val = lr_s32((void *)addr, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+		fail = sc_s32((void *)addr, (u32)rd_val > (u32)val ? rd_val : val, &uptrap);
+		if (uptrap.cause) {
+			return sbi_trap_redirect(regs, &uptrap);
+		}
+	}
+	SET_RD(insn, regs, rd_val);
+	regs->mepc += 4;
+	return 0;
+}
+
+static const illegal_insn_func amo_insn_table[32] = {
+	amoadd_insn, /* 0 */
+	amoswap_insn, /* 1 */
+	lr_insn, /* 2 */
+	sc_insn, /* 3 */
+	amoxor_insn, /* 4 */
+	truly_illegal_insn, /* 5 */
+	truly_illegal_insn, /* 6 */
+	truly_illegal_insn, /* 7 */
+	amoor_insn, /* 8 */
+	truly_illegal_insn, /* 9 */
+	truly_illegal_insn, /* 10 */
+	truly_illegal_insn, /* 11 */
+	amoand_insn, /* 12 */
+	truly_illegal_insn, /* 13 */
+	truly_illegal_insn, /* 14 */
+	truly_illegal_insn, /* 15 */
+	amomin_insn, /* 16 */
+	truly_illegal_insn, /* 17 */
+	truly_illegal_insn, /* 18 */
+	truly_illegal_insn, /* 19 */
+	amomax_insn, /* 20 */
+	truly_illegal_insn, /* 21 */
+	truly_illegal_insn, /* 22 */
+	truly_illegal_insn, /* 23 */
+	amominu_insn, /* 24 */
+	truly_illegal_insn, /* 25 */
+	truly_illegal_insn, /* 26 */
+	truly_illegal_insn, /* 27 */
+	amomaxu_insn, /* 28 */
+	truly_illegal_insn, /* 29 */
+	truly_illegal_insn, /* 30 */
+	truly_illegal_insn  /* 31 */
+};
+
+int sbi_illegal_atomic(ulong insn, struct sbi_trap_regs *regs)
+{
+	return amo_insn_table[(insn >> 27) & 0x1f](insn, regs);
+}
+
+#elif __riscv_atomic
 
 int sbi_illegal_atomic(ulong insn, struct sbi_trap_regs *regs)
 {

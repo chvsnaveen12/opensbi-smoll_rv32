@@ -30,7 +30,10 @@ _start:
 	/* Pick one hart to run the main boot sequence */
 	lla	a3, _hart_lottery
 	li	a2, 1
-#ifdef __riscv_atomic
+#ifdef SMOLL_RV32
+	sw 		a2, (a3)
+	li 		a3, 0
+#elif __riscv_atomic
 	amoadd.w a3, a2, (a3)
 #elif __riscv_zalrsc
 _sc_fail:

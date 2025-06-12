@@ -59,7 +59,10 @@ _try_lottery:
 	/* Jump to relocation wait loop if we don't get relocation lottery */
 	lla	a6, _boot_lottery
 	li	a7, BOOT_LOTTERY_ACQUIRED
-#ifdef __riscv_atomic
+#ifdef SMOLL_RV32
+	sw 	a7, (a6)
+	li 	a6, 0
+#elif __riscv_atomic
 	amoswap.w a6, a7, (a6)
 	bnez	a6, _wait_for_boot_hart
 #elif __riscv_zalrsc

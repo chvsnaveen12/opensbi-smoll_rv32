@@ -22,6 +22,10 @@ static bool hpm_allowed(int hpm_num, ulong prev_mode, bool virt)
 	ulong cen = -1UL;
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
 
+#ifdef SMOLL_RV32
+	return true;
+#endif
+
 	if (prev_mode <= PRV_S) {
 		if (sbi_hart_priv_version(scratch) >= SBI_HART_PRIV_VER_1_10) {
 			cen &= csr_read(CSR_MCOUNTEREN);

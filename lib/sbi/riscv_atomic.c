@@ -31,7 +31,11 @@ void atomic_write(atomic_t *atom, long value)
 
 long atomic_add_return(atomic_t *atom, long value)
 {
-#ifdef __riscv_atomic
+#ifdef SMOLL_RV32
+	long ret;
+	ret = atom->counter;
+	atom->counter += value;
+#elif __riscv_atomic
 	long ret;
 #if __SIZEOF_LONG__ == 4
 	__asm__ __volatile__("	amoadd.w.aqrl  %1, %2, %0"
@@ -75,7 +79,17 @@ long atomic_sub_return(atomic_t *atom, long value)
 	return atomic_add_return(atom, -value);
 }
 
-#ifdef __riscv_atomic
+#ifdef SMOLL_RV32
+#define __axchg(ptr, new, size)							\
+	({						\
+		__typeof__(ptr) __ptr = (ptr);					\
+		__typeof__(new) __new = (new);					\
+		__typeof__(*(ptr)) __ret;					\
+		__ret = *(__ptr);						\
+		*(__ptr) = __new;						\
+		__ret;								\
+	})
+#elif __riscv_atomic
 #define __axchg(ptr, new, size)							\
 	({									\
 		__typeof__(ptr) __ptr = (ptr);					\
@@ -143,7 +157,15 @@ long atomic_sub_return(atomic_t *atom, long value)
 
 long atomic_cmpxchg(atomic_t *atom, long oldval, long newval)
 {
+#ifdef SMOLL_RV32
+	long ret = atom->counter;
+	if(atom->counter == oldval)
+		atom->counter = newval;
+
+	return ret;
+#elif
 	return __sync_val_compare_and_swap(&atom->counter, oldval, newval);
+#endif
 }
 
 long atomic_xchg(atomic_t *atom, long newval)
